@@ -1,0 +1,9 @@
+ALL = lpr2raw
+
+all:	$(ALL)
+
+lpr2raw: ../src/lpr2raw.c
+	$(CC) -O2 -Wall $< -o $@
+
+clean:
+	rm -f $(ALL)
