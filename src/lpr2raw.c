@@ -17,6 +17,7 @@
 
 typedef W socklen_t;
 static char ipstr[256] = LOCAL_HOST;
+static char queue[64] = {0};
 
 struct hostent *gethostbyname(char *name)
 {
@@ -49,6 +50,7 @@ struct hostent *gethostbyname(char *name)
 
 extern char *optarg;
 static char *ipstr = LOCAL_HOST;
+static char *queue = NULL;
 #endif
 
 static int fd;
@@ -210,8 +212,18 @@ fin0:
 	so_close(d);
 	so_close(fd);
 	longjmp(restart_buf, 0);
-	/* NOTREACHED */
+	/*NOTREACHED*/
 	return -1;
+}
+
+static int is_invalid_queue(void)
+{
+	char *p;
+
+	if ((p = strchr(buf, ' ')) != NULL)
+		*p = 0;
+
+	return (queue == NULL || !strlen(queue)) ? 0 : strcmp(buf, queue);
 }
 
 static int do_command_loop(int d)
@@ -228,6 +240,11 @@ static int do_command_loop(int d)
 		if (debug)
 			printf("cmd=%d len=%d arg=%s\n", cmd, len, buf);
 
+		if (is_invalid_queue()) {
+			send_nak(d);
+			continue;
+		}
+
 		/* only accept command 02, "Receive a printer job" */
 		switch (cmd) {
 		case 0x02:
@@ -240,6 +257,11 @@ static int do_command_loop(int d)
 	}
 
 fin0:
+	/* quit */
+	so_close(d);
+	so_close(fd);
+	longjmp(restart_buf, 0);
+	/*NOTREACHED*/
 	return -1;
 }
 
@@ -332,10 +354,12 @@ int main(int argc, TC *argv[])
 			goto bad_opt;
 
 		cmd = argv[i][1];
-		if (cmd == TK_a && (i + 1) < argc) {
-			tcstoeucs(ipstr, argv[++i]);
-		} else if (cmd == TK_p && (i + 1) < argc) {
+		if (cmd == TK_p && (i + 1) < argc) {
 			port = tc_atoi(argv[++i]);
+		} else if (cmd == TK_a && (i + 1) < argc) {
+			tcstoeucs(ipstr, argv[++i]);
+		} else if (cmd == TK_q && (i + 1) < argc) {
+			tcstoeucs(queue, argv[++i]);
 		} else if (cmd == TK_d) {
 			debug = 1;
 		} else {
@@ -360,13 +384,16 @@ int main(int argc, char *argv[])
 	int ch, help = 0;
 	char *appname = argv[0];
 
-	while ((ch = getopt(argc, argv, "p:a:dh")) != -1) {
+	while ((ch = getopt(argc, argv, "p:a:q:dh")) != -1) {
 		switch (ch) {
 		case 'p':
 			port = atoi(optarg);
 			break;
 		case 'a':
 			ipstr = optarg;
+			break;
+		case 'q':
+			queue = optarg;
 			break;
 		case 'd':
 			debug = 1;
