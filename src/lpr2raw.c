@@ -8,7 +8,6 @@
 #include <bstdio.h>
 #include <bstdlib.h>
 #include <bstring.h>
-#include <bsetjmp.h>
 #include <btron/bsocket.h>
 #include <tcode.h>
 #include <tstring.h>
@@ -31,7 +30,6 @@ struct hostent *gethostbyname(char *name)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <setjmp.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -53,10 +51,8 @@ static char *ipstr = LOCAL_HOST;
 static char *queue = NULL;
 #endif
 
-static int fd;
 static int port = 9100;
 static int debug = 0;
-static jmp_buf restart_buf;
 
 #define BUFSIZE 16384
 static char buf[BUFSIZE];
@@ -65,8 +61,6 @@ static char buf[BUFSIZE];
 #define send_nak(d)	send_response(d, 1)
 
 #define min(a, b)	(((a) < (b)) ? (a) : (b))
-
-static int create_socket(struct sockaddr_in *addr, char *hostname, int port);
 
 static int send_response(int d, int nak)
 {
@@ -150,7 +144,41 @@ fin0:
 	return rv;
 }
 
-static int do_command2_loop(int d)
+static int create_socket(struct sockaddr_in *addr, char *hostname, int port)
+{
+	int s;
+	struct hostent *h;
+	struct in_addr *a;
+
+	if ((s = so_socket(AF_INET, SOCK_STREAM, 0)) < 0)
+		goto fin0;
+
+	memset(addr, 0, sizeof(*addr));
+
+	/*
+	 * B-right/V(Chokanji)'s so_gethostbyname() does not support
+	 * IP address format. If failed, retry with inet_addr()
+	 */
+	if ((h = gethostbyname(hostname)) != NULL &&
+	    h->h_addrtype == AF_INET &&
+	    (a = (struct in_addr *)h->h_addr) != NULL)
+		addr->sin_addr.s_addr = a->s_addr;
+	else
+		addr->sin_addr.s_addr = inet_addr(hostname);
+
+	if (addr->sin_addr.s_addr == INADDR_NONE) {
+		so_close(s);
+		s = -1;
+		goto fin0;
+	}
+
+	addr->sin_port = htons(port);
+	addr->sin_family = AF_INET;
+fin0:
+	return s;
+}
+
+static void do_command2_loop(int d)
 {
 	int subcmd, len, d2;
 	long count;
@@ -190,7 +218,7 @@ static int do_command2_loop(int d)
 				goto fin1;
 			break;
 		case 0x03:
-			if (!count) {
+			if (count <= 0) {
 				send_nak(d);
 				goto fin1;
 			} else {
@@ -208,12 +236,7 @@ static int do_command2_loop(int d)
 fin1:
 	so_close(d2);
 fin0:
-	/* quit */
-	so_close(d);
-	so_close(fd);
-	longjmp(restart_buf, 0);
-	/*NOTREACHED*/
-	return -1;
+	return;
 }
 
 static int is_invalid_queue(void)
@@ -226,9 +249,22 @@ static int is_invalid_queue(void)
 	return (queue == NULL || !strlen(queue)) ? 0 : strcmp(buf, queue);
 }
 
-static int do_command_loop(int d)
+static int do_command_loop(int fd)
 {
-	int cmd, len;
+	int cmd, len, d;
+	struct sockaddr_in peer;
+	socklen_t peer_len;
+
+	peer_len = sizeof(peer);
+	if ((d = so_accept(fd, (struct sockaddr *)&peer, &peer_len)) < 0) {
+		printf("do_command_loop: accept\n");
+		return -1;
+	}
+
+	if (debug) {
+		printf("connected from %s port %d\n",
+			inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
+	}
 
 	while (1) {
 		if ((cmd = recv_cmd(d)) < 0)
@@ -247,63 +283,25 @@ static int do_command_loop(int d)
 
 		/* only accept command 02, "Receive a printer job" */
 		switch (cmd) {
-		case 0x02:
-			send_ack(d);
-			return do_command2_loop(d);
 		default:
 			send_nak(d);
 			break;
+		case 0x02:
+			send_ack(d);
+			do_command2_loop(d);
+			goto fin0;
 		}
 	}
 
 fin0:
-	/* quit */
 	so_close(d);
-	so_close(fd);
-	longjmp(restart_buf, 0);
-	/*NOTREACHED*/
-	return -1;
-}
-
-static int create_socket(struct sockaddr_in *addr, char *hostname, int port)
-{
-	int s;
-	struct hostent *h;
-	struct in_addr *a;
-
-	if ((s = so_socket(AF_INET, SOCK_STREAM, 0)) < 0)
-		goto fin0;
-
-	memset(addr, 0, sizeof(*addr));
-
-	/*
-	 * B-right/V(Chokanji)'s so_gethostbyname() does not support
-	 * IP address format. If failed, retry with inet_addr()
-	 */
-	if ((h = gethostbyname(hostname)) != NULL &&
-	    h->h_addrtype == AF_INET &&
-	    (a = (struct in_addr *)h->h_addr) != NULL)
-		addr->sin_addr.s_addr = a->s_addr;
-	else
-		addr->sin_addr.s_addr = inet_addr(hostname);
-
-	if (addr->sin_addr.s_addr == INADDR_NONE) {
-		so_close(s);
-		s = -1;
-		goto fin0;
-	}
-
-	addr->sin_port = htons(port);
-	addr->sin_family = AF_INET;
-fin0:
-	return s;
+	return 0;
 }
 
 static int do_main(void)
 {
-	int d, en = 1, rv = -1;
-	struct sockaddr_in addr, peer;
-	socklen_t peer_len;
+	int fd, en = 1, rv = -1;
+	struct sockaddr_in addr;
 
 	/* create socket */
 	if ((fd = create_socket(&addr, LOCAL_HOST, LOCAL_PORT)) < 0) {
@@ -323,21 +321,7 @@ static int do_main(void)
 		goto fin1;
 	}
 
-	peer_len = sizeof(peer);
-	if ((d = so_accept(fd, (struct sockaddr *)&peer, &peer_len)) < 0) {
-		printf("do_main: accept\n");
-		goto fin1;
-	}
-
-	if (debug) {
-		printf("connected from %s port %d\n",
-			inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
-	}
-
-	do_command_loop(d);
-	rv = 0;
-
-	so_close(d);
+	while ((rv = do_command_loop(fd)) >= 0);
 fin1:
 	so_close(fd);
 fin0:
@@ -374,7 +358,6 @@ bad_opt:
 		return -1;
 	}
 
-	setjmp(restart_buf);
 	return do_main();
 }
 
@@ -410,7 +393,6 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-	setjmp(restart_buf);
 	return do_main();
 }
 #endif
