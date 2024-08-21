@@ -159,9 +159,11 @@ static int create_socket(struct sockaddr_in *addr, char *hostname, int port)
 	 * B-right/V(Chokanji)'s so_gethostbyname() does not support
 	 * IP address format. If failed, retry with inet_addr()
 	 */
-	if ((h = gethostbyname(hostname)) != NULL &&
-	    h->h_addrtype == AF_INET &&
-	    (a = (struct in_addr *)h->h_addr) != NULL)
+	if (hostname == NULL)
+		addr->sin_addr.s_addr = INADDR_ANY;
+	else if ((h = gethostbyname(hostname)) != NULL &&
+		 h->h_addrtype == AF_INET &&
+		 (a = (struct in_addr *)h->h_addr) != NULL)
 		addr->sin_addr.s_addr = a->s_addr;
 	else
 		addr->sin_addr.s_addr = inet_addr(hostname);
